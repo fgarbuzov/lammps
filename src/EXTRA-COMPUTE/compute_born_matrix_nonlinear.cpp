@@ -1,24 +1,9 @@
-/* ----------------------------------------------------------------------
-   LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
-   https://www.lammps.org/, Sandia National Laboratories
-   LAMMPS development team: developers@lammps.org
-
-   Copyright (2003) Sandia Corporation.  Under the terms of Contract
-   DE-AC04-94AL85000 with Sandia Corporation, the U.S. Government retains
-   certain rights in this software.  This software is distributed under
-   the GNU General Public License.
-
-   See the README file in the top-level LAMMPS directory.
-------------------------------------------------------------------------- */
-
 #include "compute_born_matrix_nonlinear.h"
 
 #include "atom.h"
-#include "comm.h"
 #include "compute.h"
 #include "domain.h"
 #include "error.h"
-#include "force.h"
 #include "memory.h"
 #include "modify.h"
 #include "update.h"
@@ -26,60 +11,38 @@
 #include <cstring>
 
 using namespace LAMMPS_NS;
-
 /* ---------------------------------------------------------------------- */
 
 ComputeBornMatrixNonlinear::ComputeBornMatrixNonlinear(LAMMPS *lmp, int narg, char **arg) :
-    Compute(lmp, narg, arg), values_global(nullptr), compute_born(nullptr), id_born(nullptr),
-    temp_x(nullptr), temp_f(nullptr)
+    Compute(lmp, narg, arg), values_local(nullptr), values_global(nullptr),
+    id_born(nullptr), compute_born(nullptr), temp_x(nullptr), temp_f(nullptr)
 {
   if (narg < 5) error->all(FLERR, "Illegal compute born/matrix/nonlinear command");
 
-  nvalues = NDIR_VIRIAL * NELASTIC;    // 6 * 21 = 126
+  nvalues = NDIR * NBORN; //126
 
   numdelta = utils::numeric(FLERR, arg[3], false, lmp);
-  if (numdelta <= 0.0) error->all(FLERR, "Illegal compute born/matrix/nonlinear command");
-
+  if (numdelta <= 0.0) error->all(FLERR, "Illegal compute born/matrix command");
   id_born = utils::strdup(arg[4]);
+  compute_born = modify->get_compute_by_id(id_born);
+  if (!compute_born)
+    error->all(FLERR, 4, "Could not find compute born/matrix/nonliear born/matrix ID {}", id_born);
 
-  // this compute produces a global vector
+  // Initialize some variables
 
-  memory->create(vector, nvalues, "born/matrix/nonlinear:vector");
-  memory->create(values_global, nvalues, "born/matrix/nonlinear:values_global");
+  values_local = values_global = vector = nullptr;
+
+  // this fix produces a global vector
+
+  memory->create(vector, nvalues, "born_matrix_nonlinear:vector");
+  memory->create(values_global, nvalues, "born_matrix_nonlinear:values_global");
   size_vector = nvalues;
 
   vector_flag = 1;
   extvector = 0;
   maxatom = 0;
-}
 
-/* ---------------------------------------------------------------------- */
-
-ComputeBornMatrixNonlinear::~ComputeBornMatrixNonlinear()
-{
-  memory->destroy(values_global);
-  memory->destroy(vector);
-  memory->destroy(temp_x);
-  memory->destroy(temp_f);
-  delete[] id_born;
-}
-
-/* ---------------------------------------------------------------------- */
-
-void ComputeBornMatrixNonlinear::init()
-{
-  // re-check for born matrix compute
-
-  compute_born = modify->get_compute_by_id(id_born);
-  if (!compute_born)
-    error->all(FLERR, Error::NOLASTLINE,
-               "Could not find compute born/matrix compute ID {}", id_born);
-  if (compute_born->vector_flag == 0)
-    error->all(FLERR, Error::NOLASTLINE,
-               "Compute born/matrix/nonlinear compute ID {} does not compute a vector", id_born);
-  if (compute_born->size_vector != NELASTIC)
-    error->all(FLERR, Error::NOLASTLINE,
-               "Compute born/matrix/nonlinear compute ID {} must have 21 components", id_born);
+  reallocate();
 
   // set fixed-point to default = center of cell
 
@@ -104,10 +67,32 @@ void ComputeBornMatrixNonlinear::init()
   dirlist[5][1] = 1;
 }
 
+/* ---------------------------------------------------------------------- */
+
+ComputeBornMatrixNonlinear::~ComputeBornMatrixNonlinear()
+{
+  memory->destroy(values_global);
+  memory->destroy(vector);
+  memory->destroy(temp_x);
+  memory->destroy(temp_f);
+  delete[] id_born;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void ComputeBornMatrixNonlinear::init()
+{
+  // re-check for virial compute
+
+  compute_born = modify->get_compute_by_id(id_born);
+  if (!compute_born)
+    error->all(FLERR, Error::NOLASTLINE, "Could not find compute born/matrix ID {}",
+                id_born);
+}
+
+
 /* ----------------------------------------------------------------------
-   compute nonlinear Born matrix (strain derivative of elastic constants)
-   dC_ijkl / dε_mn  =  (C_ijkl(+δ_mn) - C_ijkl(-δ_mn)) / (2δ)
-   Result: 126-component vector = 6 strain directions × 21 elastic constants
+   compute output vector
 ------------------------------------------------------------------------- */
 
 void ComputeBornMatrixNonlinear::compute_vector()
@@ -119,7 +104,7 @@ void ComputeBornMatrixNonlinear::compute_vector()
   int nall = atom->nlocal + atom->nghost;
   if (nall > maxatom) reallocate();
 
-  // store copy of current positions and forces for owned and ghost atoms
+  // store copy of current forces for owned and ghost atoms
 
   double **x = atom->x;
   double **f = atom->f;
@@ -130,29 +115,31 @@ void ComputeBornMatrixNonlinear::compute_vector()
       temp_f[i][k] = f[i][k];
     }
 
-  // loop over 6 outer strain directions
-  // compute finite difference of the Born matrix in each direction
+  // loop over 6 strain directions
+  // compute stress finite difference in each direction
 
-  for (int idir = 0; idir < NDIR_VIRIAL; idir++) {
+  for (int idir = 0; idir < NDIR; idir++) {
 
-    // forward: displace atoms by +δ, compute Born matrix
+    // forward
 
     displace_atoms(nall, idir, 1.0);
     compute_born->compute_vector();
-    for (int j = 0; j < NELASTIC; j++)
-      values_global[idir * NELASTIC + j] = compute_born->vector[j];
+    for (int j = 0; j < NBORN; j++) {
+      values_global[idir * NBORN + j] = compute_born->vector[j];
+    }
     restore_atoms(nall, idir);
 
-    // backward: displace atoms by -δ, compute Born matrix
+    // backward
 
     displace_atoms(nall, idir, -1.0);
     compute_born->compute_vector();
-    for (int j = 0; j < NELASTIC; j++)
-      values_global[idir * NELASTIC + j] -= compute_born->vector[j];
+    for (int j = 0; j < NBORN; j++) {
+      values_global[idir * NBORN + j] -= compute_born->vector[j];
+    }
     restore_atoms(nall, idir);
   }
 
-  // apply derivative factor: dC/de = (C(+δ) - C(-δ)) / (2δ)
+  // apply derivative factor
 
   double denominator = 0.5 / numdelta;
   for (int m = 0; m < nvalues; m++) values_global[m] *= denominator;
@@ -162,10 +149,9 @@ void ComputeBornMatrixNonlinear::compute_vector()
   for (int i = 0; i < nall; i++)
     for (int k = 0; k < 3; k++) f[i][k] = temp_f[i][k];
 
-  // copy to output vector
-
   for (int m = 0; m < nvalues; m++) vector[m] = values_global[m];
 }
+
 
 /* ----------------------------------------------------------------------
    displace position of all owned and ghost atoms
@@ -175,6 +161,8 @@ void ComputeBornMatrixNonlinear::displace_atoms(int nall, int idir, double magni
 {
   double **x = atom->x;
 
+  // NOTE: virial_addon() expressions predicated on
+  // shear strain fields (l != k) being symmetric here
   int k = dirlist[idir][0];
   int l = dirlist[idir][1];
 
@@ -190,6 +178,7 @@ void ComputeBornMatrixNonlinear::displace_atoms(int nall, int idir, double magni
     for (int i = 0; i < nall; i++) {
       x[i][k] = temp_x[i][k] + 0.5 * numdelta * magnitude * (temp_x[i][l] - fixedpoint[l]);
       x[i][l] = temp_x[i][l] + 0.5 * numdelta * magnitude * (temp_x[i][k] - fixedpoint[k]);
+      // x[i][l] = temp_x[i][l] + numdelta * magnitude * (temp_x[i][k] - fixedpoint[k]);
     }
 }
 
@@ -199,10 +188,12 @@ void ComputeBornMatrixNonlinear::displace_atoms(int nall, int idir, double magni
 
 void ComputeBornMatrixNonlinear::restore_atoms(int nall, int idir)
 {
+
+  // reset only idir coord
+
   int k = dirlist[idir][0];
   int l = dirlist[idir][1];
   double **x = atom->x;
-
   if (l == k)
     for (int i = 0; i < nall; i++) x[i][k] = temp_x[i][k];
   else
@@ -213,7 +204,7 @@ void ComputeBornMatrixNonlinear::restore_atoms(int nall, int idir)
 }
 
 /* ----------------------------------------------------------------------
-   reallocate local per-atom arrays
+   reallocated local per-atoms arrays
 ------------------------------------------------------------------------- */
 
 void ComputeBornMatrixNonlinear::reallocate()

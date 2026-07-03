@@ -497,6 +497,18 @@ void ComputeBornMatrix::compute_numdiff()
     // forward
 
     displace_atoms(nall, idir, 1.0);
+    // //debug print
+    // {
+    //   char fname[256];
+    //   snprintf(fname, sizeof(fname), "/mnt/SATA1/lammps_test/pos_pos_%d.dat", idir);
+    //   FILE* fp = fopen(fname, "w");
+    //   if (fp) {
+    //     for (int i = 0; i < atom->nlocal; i++)
+    //       fprintf(fp, "%d %.15g %.15g %.15g\n", atom->tag[i], atom->x[i][0], atom->x[i][1], atom->x[i][2]);
+    //     fclose(fp);
+    //   }
+    // }
+    //end of debug print
     force_clear(nall);
     update_virial();
     for (int jdir = 0; jdir < NDIR_VIRIAL; jdir++) {
@@ -508,6 +520,18 @@ void ComputeBornMatrix::compute_numdiff()
     // backward
 
     displace_atoms(nall, idir, -1.0);
+    //debug print
+    // {
+    //   char fname[256];
+    //   snprintf(fname, sizeof(fname), "/mnt/SATA1/lammps_test/pos_neg_%d.dat", idir);
+    //   FILE* fp = fopen(fname, "w");
+    //   if (fp) {
+    //     for (int i = 0; i < atom->nlocal; i++)
+    //       fprintf(fp, "%d %.15g %.15g %.15g\n", atom->tag[i], atom->x[i][0], atom->x[i][1], atom->x[i][2]);
+    //     fclose(fp);
+    //   }
+    // }
+    //end of debug print
     force_clear(nall);
     update_virial();
     for (int jdir = 0; jdir < NDIR_VIRIAL; jdir++) {

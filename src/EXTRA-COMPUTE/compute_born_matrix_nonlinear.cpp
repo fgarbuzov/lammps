@@ -286,12 +286,12 @@ void ComputeBornMatrixNonlinear::displace_atoms(int nall, int idir1, int idir2,
       x[i][l] += 0.5 * numdelta * magnitude1 * (temp_x[i][k] - fixedpoint[k]);
     }
 
-    // apply strain 2
+    // apply strain 2 (on top of strain 1!)
     if (n == m) {
-      x[i][m] += numdelta * magnitude2 * (temp_x[i][m] - fixedpoint[m]);
+      x[i][m] += numdelta * magnitude2 * (x[i][m] - fixedpoint[m]);
     } else {
-      x[i][m] += 0.5 * numdelta * magnitude2 * (temp_x[i][n] - fixedpoint[n]);
-      x[i][n] += 0.5 * numdelta * magnitude2 * (temp_x[i][m] - fixedpoint[m]);
+      x[i][m] += 0.5 * numdelta * magnitude2 * (x[i][n] - fixedpoint[n]);
+      x[i][n] += 0.5 * numdelta * magnitude2 * (x[i][m] - fixedpoint[m]);
     }    
   }
 }

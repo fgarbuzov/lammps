@@ -35,12 +35,12 @@ class ComputeBornMatrixNonlinear : public Compute {
  private:
   // Born matrix nonlinear contributions
 
-  void displace_atoms(int, int, int, double, double);  // displace atoms with two strains
+  void displace_atoms(int, int, int, double, double);  // displace atoms under two strains
   void force_clear(int);                               // zero out force array
   void update_virial();                                // recalculate the virial
   void restore_atoms(int);                             // restore atom positions
   void born_addon();                                   // Born matrix addon terms
-  void virial_addon();
+  void virial_addon();                                 // virial stress addon terms
   void reallocate();                                   // grow the atom arrays
 
   int nvalues;        // length of output vector (126)
@@ -53,21 +53,19 @@ class ComputeBornMatrixNonlinear : public Compute {
   char *id_virial;                  // name of virial compute
   class Compute *compute_virial;    // pointer to virial compute
 
-  char *id_born;                        // name of Born matrix compute
-  class Compute *compute_born; // pointer to Born matrix compute
+  char *id_born;                    // name of Born matrix compute
+  class Compute *compute_born;      // pointer to Born matrix compute
 
-  static constexpr int NSTRESS = 6;     // number of stress components (Voigt)
-  static constexpr int NPAIR   = 21;    // number of independent strain pairs
-  static constexpr int NDIR    = 6;     // dimension of virial and strain vectors
-  static constexpr int NXYZ    = 3;     // number of Cartesian coordinates
+  static constexpr int NPAIR = 21;  // number of independent strain pairs
+  static constexpr int NDIR  = 6;   // dimension of virial and strain vectors
+  static constexpr int NXYZ  = 3;   // number of Cartesian coordinates
 
   double **temp_x;                   // original coords
   double **temp_f;                   // original forces
   double fixedpoint[NXYZ];           // displacement field origin
   int virialVtoV[NDIR];              // LAMMPS virial -> Voigt order mapping
-  int revalbe_sigma[NXYZ][NXYZ];
-  int revalbe_C[NDIR][NDIR];
-  int revalbemunu[NXYZ][NXYZ][NXYZ][NXYZ];
+  int revalbe_sigma[NXYZ][NXYZ];     // Cartesian to Voigt index map
+  int revalbe_C[NDIR][NDIR];         // Voigt pair to Born vector index map
 };
 
 }    // namespace LAMMPS_NS

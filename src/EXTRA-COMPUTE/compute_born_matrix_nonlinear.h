@@ -39,7 +39,8 @@ class ComputeBornMatrixNonlinear : public Compute {
   void force_clear(int);                               // zero out force array
   void update_virial();                                // recalculate the virial
   void restore_atoms(int);                             // restore atom positions
-  void virial_addon();                                 // stress addon terms (dummy for now)
+  void born_addon();                                   // Born matrix addon terms
+  void virial_addon();
   void reallocate();                                   // grow the atom arrays
 
   int nvalues;        // length of output vector (126)
@@ -52,6 +53,9 @@ class ComputeBornMatrixNonlinear : public Compute {
   char *id_virial;                  // name of virial compute
   class Compute *compute_virial;    // pointer to virial compute
 
+  char *id_born;                        // name of Born matrix compute
+  class Compute *compute_born; // pointer to Born matrix compute
+
   static constexpr int NSTRESS = 6;     // number of stress components (Voigt)
   static constexpr int NPAIR   = 21;    // number of independent strain pairs
   static constexpr int NDIR    = 6;     // dimension of virial and strain vectors
@@ -62,6 +66,9 @@ class ComputeBornMatrixNonlinear : public Compute {
   double fixedpoint[NXYZ];           // displacement field origin
   int dirlist[NDIR][2];              // strain cartesian indices
   int virialVtoV[NDIR];              // LAMMPS virial -> Voigt order mapping
+  int revalbe_sigma[NXYZ][NXYZ];
+  int revalbe_C[NDIR][NDIR];
+  int revalbemunu[NXYZ][NXYZ][NXYZ][NXYZ];
 };
 
 }    // namespace LAMMPS_NS

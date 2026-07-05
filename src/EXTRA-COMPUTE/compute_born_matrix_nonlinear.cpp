@@ -12,6 +12,7 @@
 ------------------------------------------------------------------------- */
 
 #include "compute_born_matrix_nonlinear.h"
+#include "compute_born_matrix.h"
 
 #include "angle.h"
 #include "atom.h"
@@ -37,6 +38,18 @@
 #include <cstring>
 
 using namespace LAMMPS_NS;
+
+// this table is used to pick the 3d rij vector indices used to
+// compute the 6 indices long Voigt stress vector
+
+static int constexpr sigma_albe[6][2] = {
+    {0, 0},    // s11
+    {1, 1},    // s22
+    {2, 2},    // s33
+    {1, 2},    // s44
+    {0, 2},    // s55
+    {0, 1},    // s66
+};
 
 // this table maps the 21 independent Voigt strain pairs
 // to the Born vector indices (carbon copy of C_albe from ComputeBornMatrix)
@@ -65,13 +78,41 @@ static int constexpr C_albe[21][2] = {
     {4, 5}     // C56
 };
 
+// this table is used to pick the 3d rij vector indices used to
+// compute the 21 indices long Cij matrix (copied from ComputeBornMatrix)
+
+static int constexpr albemunu[21][4] = {
+    {0, 0, 0, 0},    // C11
+    {1, 1, 1, 1},    // C22
+    {2, 2, 2, 2},    // C33
+    {1, 2, 1, 2},    // C44
+    {0, 2, 0, 2},    // C55
+    {0, 1, 0, 1},    // C66
+    {0, 0, 1, 1},    // C12
+    {0, 0, 2, 2},    // C13
+    {0, 0, 1, 2},    // C14
+    {0, 0, 0, 2},    // C15
+    {0, 0, 0, 1},    // C16
+    {1, 1, 2, 2},    // C23
+    {1, 1, 1, 2},    // C24
+    {1, 1, 0, 2},    // C25
+    {1, 1, 0, 1},    // C26
+    {2, 2, 1, 2},    // C34
+    {2, 2, 0, 2},    // C35
+    {2, 2, 0, 1},    // C36
+    {1, 2, 0, 2},    // C45
+    {1, 2, 0, 1},    // C46
+    {0, 1, 0, 2}     // C56
+};
+
 /* ---------------------------------------------------------------------- */
 
 ComputeBornMatrixNonlinear::ComputeBornMatrixNonlinear(LAMMPS *lmp, int narg, char **arg) :
-    Compute(lmp, narg, arg), values_global(nullptr),
-    id_virial(nullptr), compute_virial(nullptr), temp_x(nullptr), temp_f(nullptr)
+    Compute(lmp, narg, arg), values_global(nullptr), temp_x(nullptr), temp_f(nullptr),
+    id_virial(nullptr), compute_virial(nullptr),
+    id_born(nullptr), compute_born(nullptr)
 {
-  if (narg < 5) error->all(FLERR, "Illegal compute born/matrix/nonlinear command");
+  if (narg < 7) error->all(FLERR, "Illegal compute born/matrix/nonlinear command");
 
   nvalues = NPAIR * NSTRESS; //126
   numflag = 1; // the only option for now
@@ -91,6 +132,12 @@ ComputeBornMatrixNonlinear::ComputeBornMatrixNonlinear(LAMMPS *lmp, int narg, ch
   if (compute_virial->pressflag == 0)
     error->all(FLERR, iarg+1, "Compute born/matrix/nonlinear virial ID {} does not compute "
                "pressure", id_virial);
+
+  id_born = utils::strdup(arg[iarg+2]);
+  compute_born = (ComputeBornMatrix *) modify->get_compute_by_id(id_born);
+  if (!compute_born)
+    error->all(FLERR, iarg+2, "Could not find compute born/matrix/nonlinear born ID {}",
+               id_born);
 
   // Initialize some variables
 
@@ -151,6 +198,7 @@ ComputeBornMatrixNonlinear::~ComputeBornMatrixNonlinear()
   memory->destroy(temp_x);
   memory->destroy(temp_f);
   delete[] id_virial;
+  delete[] id_born;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -163,6 +211,26 @@ void ComputeBornMatrixNonlinear::init()
   if (!compute_virial)
     error->all(FLERR, Error::NOLASTLINE, "Could not find compute born/matrix/nonlinear virial ID {}",
                 id_virial);
+
+  // re-check for born compute
+
+  compute_born = (ComputeBornMatrix *) modify->get_compute_by_id(id_born);
+  if (!compute_born)
+    error->all(FLERR, Error::NOLASTLINE, "Could not find compute born/matrix/nonlinear born ID {}",
+                id_born);
+  
+  for (int m = 0; m < NPAIR; m++) {
+    int a = C_albe[m][0];
+    int b = C_albe[m][1];
+    revalbe_C[a][b] = m;
+    revalbe_C[b][a] = m;
+  }
+  for (int m = 0; m < NDIR; m++) {
+    int a = sigma_albe[m][0];
+    int b = sigma_albe[m][1];
+    revalbe_sigma[a][b] = m;
+    revalbe_sigma[b][a] = m;
+  }
 }
 
 
@@ -237,8 +305,8 @@ void ComputeBornMatrixNonlinear::compute_vector()
       values_global[ipair * NSTRESS + jdir] *= denominator;
   }
 
-  // add on virial terms (dummy for now)
-
+  // add on virial stress contributions
+  update_virial();
   virial_addon();
 
   // convert from pressure to energy units
@@ -246,6 +314,10 @@ void ComputeBornMatrixNonlinear::compute_vector()
   double inv_nktv2p = 1.0 / force->nktv2p;
   double volume = domain->xprd * domain->yprd * domain->zprd;
   for (int m = 0; m < nvalues; m++) { values_global[m] *= inv_nktv2p * volume; }
+
+  // add on Born matrix contributions
+  compute_born->compute_vector();
+  born_addon();
 
   // restore original forces for owned and ghost atoms
 
@@ -334,12 +406,108 @@ void ComputeBornMatrixNonlinear::update_virial()
 
 /* ----------------------------------------------------------------------
    calculate virial stress addon terms to the nonlinear Born matrix
-   (dummy for now - to be implemented later)
 ------------------------------------------------------------------------- */
 
 void ComputeBornMatrixNonlinear::virial_addon()
 {
-  // placeholder for stress addon terms
+  double *sigv = compute_virial->vector;
+
+  for (int ipair = 0; ipair < NPAIR; ipair++) {
+
+    int idir2 = C_albe[ipair][0];
+    int idir3 = C_albe[ipair][1];
+
+    int k = sigma_albe[idir2][0];
+    int l = sigma_albe[idir2][1];
+    int m = sigma_albe[idir3][0];
+    int n = sigma_albe[idir3][1];
+
+    for (int idir1 = 0; idir1 < NDIR; idir1++) {
+      int i = sigma_albe[idir1][0];
+      int j = sigma_albe[idir1][1];
+
+      values_global[ipair * NSTRESS + idir1] += 1.0/6.0 * (
+        (i==m) * (j==k) * sigv[revalbe_sigma[n][l]] +
+        (i==n) * (j==k) * sigv[revalbe_sigma[m][l]] +
+        (i==m) * (j==l) * sigv[revalbe_sigma[n][k]] +
+        (i==n) * (j==l) * sigv[revalbe_sigma[m][k]] +
+        (j==m) * (i==k) * sigv[revalbe_sigma[n][l]] +
+        (j==n) * (i==k) * sigv[revalbe_sigma[m][l]] +
+        (j==m) * (i==l) * sigv[revalbe_sigma[n][k]] +
+        (j==n) * (i==l) * sigv[revalbe_sigma[m][k]]
+      );
+
+      values_global[ipair * NSTRESS + idir1] += 1.0/6.0 * (
+        (i==k) * (l==m) * sigv[revalbe_sigma[n][j]] +
+        (i==k) * (l==n) * sigv[revalbe_sigma[m][j]] +
+        (i==l) * (k==m) * sigv[revalbe_sigma[n][j]] +
+        (i==l) * (k==n) * sigv[revalbe_sigma[m][j]] +
+        (j==k) * (l==m) * sigv[revalbe_sigma[n][i]] +
+        (j==k) * (l==n) * sigv[revalbe_sigma[m][i]] +
+        (j==l) * (k==m) * sigv[revalbe_sigma[n][i]] +
+        (j==l) * (k==n) * sigv[revalbe_sigma[m][i]]
+      );
+
+      values_global[ipair * NSTRESS + idir1] += 1.0/6.0 * (
+        (k==m) * (i==n) * sigv[revalbe_sigma[l][j]] +
+        (k==n) * (i==m) * sigv[revalbe_sigma[l][j]] +
+        (l==m) * (i==n) * sigv[revalbe_sigma[k][j]] +
+        (l==n) * (i==m) * sigv[revalbe_sigma[k][j]] +
+        (k==m) * (j==n) * sigv[revalbe_sigma[l][i]] +
+        (k==n) * (j==m) * sigv[revalbe_sigma[l][i]] +
+        (l==m) * (j==n) * sigv[revalbe_sigma[k][i]] +
+        (l==n) * (j==m) * sigv[revalbe_sigma[k][i]]
+      );
+    }
+  }
+}
+
+/* ----------------------------------------------------------------------
+   calculate Born addon terms to the nonlinear Born matrix
+------------------------------------------------------------------------- */
+
+void ComputeBornMatrixNonlinear::born_addon()
+{
+  double *bornv = compute_born->vector;
+  //double *sigv = compute_virial->vector;
+  //int vec_index;
+
+  for (int ipair = 0; ipair < NPAIR; ipair++) {
+
+    int idir2 = C_albe[ipair][0];
+    int idir3 = C_albe[ipair][1];
+
+    int k = sigma_albe[idir2][0];
+    int l = sigma_albe[idir2][1];
+    int m = sigma_albe[idir3][0];
+    int n = sigma_albe[idir3][1];
+
+    for (int idir1 = 0; idir1 < NDIR; idir1++) {
+      int i = sigma_albe[idir1][0];
+      int j = sigma_albe[idir1][1];
+
+      values_global[ipair * NSTRESS + idir1] -= 0.5 * (
+        (k==m) * bornv[revalbe_C[idir1][revalbe_sigma[n][l]]] +
+        (k==n) * bornv[revalbe_C[idir1][revalbe_sigma[m][l]]] +
+        (l==m) * bornv[revalbe_C[idir1][revalbe_sigma[n][k]]] +
+        (l==n) * bornv[revalbe_C[idir1][revalbe_sigma[m][k]]]
+      );
+
+      values_global[ipair * NSTRESS + idir1] -= 0.5 * (
+        (i==m) * bornv[revalbe_C[revalbe_sigma[n][j]][idir2]] +
+        (i==n) * bornv[revalbe_C[revalbe_sigma[m][j]][idir2]] +
+        (j==m) * bornv[revalbe_C[revalbe_sigma[n][i]][idir2]] +
+        (j==n) * bornv[revalbe_C[revalbe_sigma[m][i]][idir2]]
+      );
+
+      values_global[ipair * NSTRESS + idir1] -= 0.5 * (
+        (i==k) * bornv[revalbe_C[revalbe_sigma[l][j]][idir3]] +
+        (i==l) * bornv[revalbe_C[revalbe_sigma[k][j]][idir3]] +
+        (j==k) * bornv[revalbe_C[revalbe_sigma[l][i]][idir3]] +
+        (j==l) * bornv[revalbe_C[revalbe_sigma[k][i]][idir3]]
+      );
+    }
+  }
 }
 
 /* ----------------------------------------------------------------------

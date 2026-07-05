@@ -12,7 +12,6 @@
 ------------------------------------------------------------------------- */
 
 #include "compute_born_matrix_nonlinear.h"
-#include "compute_born_matrix.h"
 
 #include "angle.h"
 #include "atom.h"
@@ -52,7 +51,7 @@ static int constexpr sigma_albe[6][2] = {
 };
 
 // this table maps the 21 independent Voigt strain pairs
-// to the Born vector indices (carbon copy of C_albe from ComputeBornMatrix)
+// to the Born vector indices (copied from ComputeBornMatrix)
 
 static int constexpr C_albe[21][2] = {
     {0, 0},    // C11
@@ -78,33 +77,6 @@ static int constexpr C_albe[21][2] = {
     {4, 5}     // C56
 };
 
-// this table is used to pick the 3d rij vector indices used to
-// compute the 21 indices long Cij matrix (copied from ComputeBornMatrix)
-
-static int constexpr albemunu[21][4] = {
-    {0, 0, 0, 0},    // C11
-    {1, 1, 1, 1},    // C22
-    {2, 2, 2, 2},    // C33
-    {1, 2, 1, 2},    // C44
-    {0, 2, 0, 2},    // C55
-    {0, 1, 0, 1},    // C66
-    {0, 0, 1, 1},    // C12
-    {0, 0, 2, 2},    // C13
-    {0, 0, 1, 2},    // C14
-    {0, 0, 0, 2},    // C15
-    {0, 0, 0, 1},    // C16
-    {1, 1, 2, 2},    // C23
-    {1, 1, 1, 2},    // C24
-    {1, 1, 0, 2},    // C25
-    {1, 1, 0, 1},    // C26
-    {2, 2, 1, 2},    // C34
-    {2, 2, 0, 2},    // C35
-    {2, 2, 0, 1},    // C36
-    {1, 2, 0, 2},    // C45
-    {1, 2, 0, 1},    // C46
-    {0, 1, 0, 2}     // C56
-};
-
 /* ---------------------------------------------------------------------- */
 
 ComputeBornMatrixNonlinear::ComputeBornMatrixNonlinear(LAMMPS *lmp, int narg, char **arg) :
@@ -112,7 +84,7 @@ ComputeBornMatrixNonlinear::ComputeBornMatrixNonlinear(LAMMPS *lmp, int narg, ch
     id_virial(nullptr), compute_virial(nullptr),
     id_born(nullptr), compute_born(nullptr)
 {
-  if (narg < 7) error->all(FLERR, "Illegal compute born/matrix/nonlinear command");
+  if (narg < 6) error->all(FLERR, "Illegal compute born/matrix/nonlinear command");
 
   nvalues = NPAIR * NSTRESS; //126
   numflag = 1; // the only option for now
@@ -134,7 +106,7 @@ ComputeBornMatrixNonlinear::ComputeBornMatrixNonlinear(LAMMPS *lmp, int narg, ch
                "pressure", id_virial);
 
   id_born = utils::strdup(arg[iarg+2]);
-  compute_born = (ComputeBornMatrix *) modify->get_compute_by_id(id_born);
+  compute_born = modify->get_compute_by_id(id_born);
   if (!compute_born)
     error->all(FLERR, iarg+2, "Could not find compute born/matrix/nonlinear born ID {}",
                id_born);
@@ -160,22 +132,6 @@ ComputeBornMatrixNonlinear::ComputeBornMatrixNonlinear(LAMMPS *lmp, int narg, ch
   fixedpoint[0] = 0.5 * (domain->boxlo[0] + domain->boxhi[0]);
   fixedpoint[1] = 0.5 * (domain->boxlo[1] + domain->boxhi[1]);
   fixedpoint[2] = 0.5 * (domain->boxlo[2] + domain->boxhi[2]);
-
-  // define the cartesian indices for each strain (Voigt order)
-
-  dirlist[0][0] = 0;
-  dirlist[0][1] = 0;
-  dirlist[1][0] = 1;
-  dirlist[1][1] = 1;
-  dirlist[2][0] = 2;
-  dirlist[2][1] = 2;
-
-  dirlist[3][0] = 1;
-  dirlist[3][1] = 2;
-  dirlist[4][0] = 0;
-  dirlist[4][1] = 2;
-  dirlist[5][0] = 0;
-  dirlist[5][1] = 1;
 
   // reorder LAMMPS virial vector to Voigt order
   // LAMMPS stress order: xx, yy, zz, xy, xz, yz (for symmetric)
@@ -214,7 +170,7 @@ void ComputeBornMatrixNonlinear::init()
 
   // re-check for born compute
 
-  compute_born = (ComputeBornMatrix *) modify->get_compute_by_id(id_born);
+  compute_born = modify->get_compute_by_id(id_born);
   if (!compute_born)
     error->all(FLERR, Error::NOLASTLINE, "Could not find compute born/matrix/nonlinear born ID {}",
                 id_born);
@@ -338,10 +294,10 @@ void ComputeBornMatrixNonlinear::displace_atoms(int nall, int idir1, int idir2,
 {
   double **x = atom->x;
 
-  int k = dirlist[idir1][0];
-  int l = dirlist[idir1][1];
-  int m = dirlist[idir2][0];
-  int n = dirlist[idir2][1];
+  int k = sigma_albe[idir1][0];
+  int l = sigma_albe[idir1][1];
+  int m = sigma_albe[idir2][0];
+  int n = sigma_albe[idir2][1];
 
   // NOTE: just as in ComputeBornMatrix, expressions predicated on 
   // shear strain fields (l != k and m != n) being symmetric here

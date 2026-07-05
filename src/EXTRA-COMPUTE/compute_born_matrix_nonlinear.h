@@ -64,7 +64,6 @@ class ComputeBornMatrixNonlinear : public Compute {
   double **temp_x;                   // original coords
   double **temp_f;                   // original forces
   double fixedpoint[NXYZ];           // displacement field origin
-  int dirlist[NDIR][2];              // strain cartesian indices
   int virialVtoV[NDIR];              // LAMMPS virial -> Voigt order mapping
   int revalbe_sigma[NXYZ][NXYZ];
   int revalbe_C[NDIR][NDIR];

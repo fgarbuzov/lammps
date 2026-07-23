@@ -59,6 +59,7 @@ class ComputeBornMatrix : public Compute {
 
   int pairflag, bondflag, angleflag;
   int dihedflag, impflag;
+  int gpu_flag;
 
   double *values_local, *values_global;
   class NeighList *list;

@@ -44,6 +44,12 @@ using namespace LAMMPS_NS;
 
 static constexpr double SMALL = 1e-16;
 
+#ifdef LMP_GPU
+// GPU library function to retrieve forces, virial, and energy from device
+extern double lmp_gpu_forces(double **f, double **tor, double *eatom, double **vatom,
+                              double *virial, double &ecoul, int &err_flag);
+#endif
+
 // this table is used to pick the 3d rij vector indices used to
 // compute the 6 indices long Voigt stress vector
 
@@ -122,6 +128,7 @@ ComputeBornMatrix::ComputeBornMatrix(LAMMPS *lmp, int narg, char **arg) :
 
   numflag = 0;
   numdelta = 0.0;
+  gpu_flag = 0;
 
   pairflag = bondflag = angleflag = dihedflag = impflag = 0;
   if (narg == 3) {
@@ -289,6 +296,10 @@ ComputeBornMatrix::~ComputeBornMatrix()
 
 void ComputeBornMatrix::init()
 {
+  // detect if GPU package is active
+  gpu_flag = 0;
+  if (modify->get_fix_by_id("package_gpu")) gpu_flag = 1;
+
   if (!numflag) {
 
     // need an occasional half neighbor list
@@ -531,6 +542,22 @@ void ComputeBornMatrix::compute_numdiff()
 
   virial_addon();
 
+  // ensure GPU library buffers are drained after all displaced evaluations
+  // this is critical: without this, the GPU library's persistent buffers
+  // contain stale forces/virial from the last update_virial() call,
+  // which would then be added on the next normal Verlet step via
+  // FixGPU::post_force(), corrupting the simulation.
+
+#ifdef LMP_GPU
+  if (gpu_flag) {
+    double lvirial[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    int err_flag = 0;
+    double gpu_eng_coul = 0.0;
+    lmp_gpu_forces(atom->f, atom->torque, force->pair->eatom, force->pair->vatom,
+                   lvirial, gpu_eng_coul, err_flag);
+  }
+#endif
+
   // restore original forces for owned and ghost atoms
 
   for (int i = 0; i < nall; i++)
@@ -602,6 +629,38 @@ void ComputeBornMatrix::update_virial()
   int vflag = VIRIAL_PAIR;
 
   if (force->pair) force->pair->compute(eflag, vflag);
+
+  // if GPU package is active, drain the GPU library buffers
+  // to retrieve forces and virial that were computed on device.
+  // The GPU library accumulates forces/virial in persistent buffers,
+  // which must be drained via lmp_gpu_forces() after each compute() call.
+  // Otherwise the buffers accumulate contributions from multiple
+  // displaced-configuration evaluations (called from compute_numdiff())
+  // which then get added on the next normal Verlet step, corrupting the system.
+  // We drain the virial and add it to pair->virial[] so that the
+  // compute_virial->compute_vector() call below gets the complete virial.
+
+#ifdef LMP_GPU
+  if (gpu_flag) {
+    double lvirial[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    int err_flag = 0;
+    double gpu_eng_coul = 0.0;
+    // torque and per-atom arrays won't be accessed afterwards (forces get cleared)
+    // But we pass atom->f so the library can write forces if needed.
+    // The forces will be overwritten by normalize or the next force_clear() anyway.
+    lmp_gpu_forces(atom->f, atom->torque, force->pair->eatom, force->pair->vatom,
+                   lvirial, gpu_eng_coul, err_flag);
+    // accumulate GPU virial into pair's virial
+    force->pair->virial[0] += lvirial[0];
+    force->pair->virial[1] += lvirial[1];
+    force->pair->virial[2] += lvirial[2];
+    force->pair->virial[3] += lvirial[3];
+    force->pair->virial[4] += lvirial[4];
+    force->pair->virial[5] += lvirial[5];
+    // accumulate GPU pair energy
+    force->pair->eng_vdwl += gpu_eng_coul;
+  }
+#endif
 
   if (atom->molecular != Atom::ATOMIC) {
     if (force->bond) force->bond->compute(eflag, vflag);
